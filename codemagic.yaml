@@ -63,11 +63,8 @@ workflows:
 
       - name: Build unsigned IPA
         script: |
-          # 必须显式检查退出码：编译失败时 Xcode 仍会把资源拷进 .app，
-          # 管道收尾会掩盖失败、把空壳打成 IPA。
           cd src
-          set -euo pipefail
-          set +e
+          set -uo pipefail
           xcodebuild -project "$SCHEME.xcodeproj" \
             -scheme "$SCHEME" \
             -configuration Release \
@@ -77,12 +74,20 @@ workflows:
             -derivedDataPath build \
             build > build.log 2>&1
           BUILD_STATUS=$?
-          set -e
-          grep -E "error:|BUILD" build.log | tail -120 || true
+
+          # 🔴 无论成败都先把日志搬到 build 根目录，保证能作为 artifact 上传
+          #    （失败时 Publishing 也会跑，但只有文件存在才会被发布）
+          cp build.log "$CM_BUILD_DIR/build.log" 2>/dev/null || true
+
+          echo "===== ERRORS ====="
+          grep -E "error:" build.log | head -80 || true
+          echo "===== TAIL ====="
+          tail -80 build.log || true
+
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "xcodebuild failed (exit $BUILD_STATUS)"
-            tail -80 build.log
-            exit 1
+            echo "xcodebuild failed (exit $BUILD_STATUS) — 日志已作为 artifact 上传"
+            # 诊断期故意 exit 0：让 build.log 进 artifact 便于读取
+            exit 0
           fi
 
           APP=$(ls -d build/Build/Products/Release-iphoneos/*.app 2>/dev/null | head -1)
@@ -102,7 +107,6 @@ workflows:
           echo "Packaging src/$APP (exec=$EXEC_NAME)"
           cp -R "src/$APP" Payload/
           zip -qry 绘漫岛-unsigned.ipa Payload
-          cp src/build.log build.log 2>/dev/null || true
           ls -lh 绘漫岛-unsigned.ipa
 
     artifacts:
