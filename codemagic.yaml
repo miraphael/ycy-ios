@@ -6,6 +6,9 @@
 #   这个仓库用同名把它重新占住，构建时再去 clone 真正的项目源码。
 #
 # 产物：绘漫岛-unsigned.ipa（未签名，装机前需 zsign 重签）
+#
+# ⚠️ miraphael/huimandao 的仓库根目录 **就是** ios/ 目录（project.yml 在根），
+#    所以 clone 下来直接 cd src 即可，没有 src/ios 这一层。
 
 workflows:
   build-huimandao:
@@ -28,29 +31,41 @@ workflows:
           set -e
           rm -rf src
           git clone --depth 1 "$APP_REPO" src
-          cd src && git log --oneline -1
+          cd src && git log --oneline -1 && ls -la | head -30
+
+      - name: Install xcodegen
+        script: |
+          set -e
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            echo "xcodegen not found, installing"
+            brew install xcodegen
+          fi
+          xcodegen --version
 
       - name: Show toolchain versions
         script: |
           xcodebuild -version
           swift --version
-          xcodegen --version || brew install xcodegen
 
       - name: Generate Xcode project
         script: |
-          cd src/ios
+          set -euxo pipefail
+          pwd
+          ls -la src | head -40
+          cd src
           xcodegen generate
+          ls -la "$SCHEME.xcodeproj" | head -10
 
       - name: Resolve SPM dependencies
         script: |
-          cd src/ios
+          cd src
           xcodebuild -project "$SCHEME.xcodeproj" -resolvePackageDependencies -scheme "$SCHEME" || true
 
       - name: Build unsigned IPA
         script: |
           # 必须显式检查退出码：编译失败时 Xcode 仍会把资源拷进 .app，
           # 管道收尾会掩盖失败、把空壳打成 IPA。
-          cd src/ios
+          cd src
           set -euo pipefail
           set +e
           xcodebuild -project "$SCHEME.xcodeproj" \
@@ -63,10 +78,10 @@ workflows:
             build > build.log 2>&1
           BUILD_STATUS=$?
           set -e
-          grep -E "error:|BUILD" build.log | tail -100 || true
+          grep -E "error:|BUILD" build.log | tail -120 || true
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "xcodebuild failed (exit $BUILD_STATUS)"
-            tail -60 build.log
+            tail -80 build.log
             exit 1
           fi
 
@@ -84,10 +99,10 @@ workflows:
           cd "$CM_BUILD_DIR"
           rm -rf Payload 绘漫岛-unsigned.ipa
           mkdir -p Payload
-          echo "Packaging src/ios/$APP (exec=$EXEC_NAME)"
-          cp -R "src/ios/$APP" Payload/
+          echo "Packaging src/$APP (exec=$EXEC_NAME)"
+          cp -R "src/$APP" Payload/
           zip -qry 绘漫岛-unsigned.ipa Payload
-          cp src/ios/build.log build.log 2>/dev/null || true
+          cp src/build.log build.log 2>/dev/null || true
           ls -lh 绘漫岛-unsigned.ipa
 
     artifacts:
