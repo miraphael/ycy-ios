@@ -1,0 +1,95 @@
+# CI 跳板仓库 —— 只放构建配置，真正的源码在 miraphael/huimandao
+#
+# 为什么存在：
+#   Codemagic 上的应用 `ycy-ios`（appId 6ac8707178dd78cd4dc1d681）绑定的仓库
+#   已经被删了，而 Codemagic 没有「通过 API 新建应用」的接口。
+#   这个仓库用同名把它重新占住，构建时再去 clone 真正的项目源码。
+#
+# 产物：绘漫岛-unsigned.ipa（未签名，装机前需 zsign 重签）
+
+workflows:
+  build-huimandao:
+    name: Build 绘漫岛 IPA
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      # 必须 Xcode 16.3+：Nuke 13.x 用了 `nonisolated`（Swift 6.1 语法）
+      xcode: latest
+      vars:
+        APP_REPO: https://github.com/miraphael/huimandao.git
+        SCHEME: 绘漫岛
+    cache:
+      cache_paths:
+        - $HOME/Library/Caches/org.swift.swiftpm
+        - $HOME/Library/Developer/Xcode/DerivedData
+    scripts:
+      - name: Checkout app source
+        script: |
+          set -e
+          rm -rf src
+          git clone --depth 1 "$APP_REPO" src
+          cd src && git log --oneline -1
+
+      - name: Show toolchain versions
+        script: |
+          xcodebuild -version
+          swift --version
+          xcodegen --version || brew install xcodegen
+
+      - name: Generate Xcode project
+        script: |
+          cd src/ios
+          xcodegen generate
+
+      - name: Resolve SPM dependencies
+        script: |
+          cd src/ios
+          xcodebuild -project "$SCHEME.xcodeproj" -resolvePackageDependencies -scheme "$SCHEME" || true
+
+      - name: Build unsigned IPA
+        script: |
+          # 必须显式检查退出码：编译失败时 Xcode 仍会把资源拷进 .app，
+          # 管道收尾会掩盖失败、把空壳打成 IPA。
+          cd src/ios
+          set -euo pipefail
+          set +e
+          xcodebuild -project "$SCHEME.xcodeproj" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" CODE_SIGN_ENTITLEMENTS="" \
+            -derivedDataPath build \
+            build > build.log 2>&1
+          BUILD_STATUS=$?
+          set -e
+          grep -E "error:|BUILD" build.log | tail -100 || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "xcodebuild failed (exit $BUILD_STATUS)"
+            tail -60 build.log
+            exit 1
+          fi
+
+          APP=$(ls -d build/Build/Products/Release-iphoneos/*.app 2>/dev/null | head -1)
+          if [ -z "$APP" ]; then
+            echo "no .app produced"
+            exit 1
+          fi
+          EXEC_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist" 2>/dev/null || echo "")
+          if [ -z "$EXEC_NAME" ] || [ ! -f "$APP/$EXEC_NAME" ]; then
+            echo "missing executable (CFBundleExecutable='$EXEC_NAME')"
+            exit 1
+          fi
+
+          cd "$CM_BUILD_DIR"
+          rm -rf Payload 绘漫岛-unsigned.ipa
+          mkdir -p Payload
+          echo "Packaging src/ios/$APP (exec=$EXEC_NAME)"
+          cp -R "src/ios/$APP" Payload/
+          zip -qry 绘漫岛-unsigned.ipa Payload
+          cp src/ios/build.log build.log 2>/dev/null || true
+          ls -lh 绘漫岛-unsigned.ipa
+
+    artifacts:
+      - 绘漫岛-unsigned.ipa
+      - build.log
